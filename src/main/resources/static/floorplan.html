@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>FloorPlan — Canvas</title>
+  <style>
+    html,body { height:100%; margin:0; font-family:system-ui,Segoe UI,Roboto,Arial; }
+    .toolbar { display:flex; gap:8px; padding:8px; background:#f3f4f6; border-bottom:1px solid #e5e7eb; }
+    button { padding:8px 12px; border-radius:6px; border:1px solid #d1d5db; background:white; cursor:pointer; }
+    #canvasWrap { position:relative; height:calc(100% - 50px); background:linear-gradient(180deg,#ffffff,#f8fafc); }
+    canvas { background:white; display:block; margin:16px; border:1px solid #e5e7eb; box-shadow:0 6px 18px rgba(0,0,0,0.04); }
+    .info { margin-left:auto; padding:8px; color:#374151; font-size:13px; }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <button id="addRoom">Add Room</button>
+    <button id="loadAll">Load All</button>
+    <button id="deleteRoom">Delete Selected</button>
+    <button id="clearAll">Clear All</button>
+    <div class="info">Drag to move. Drag bottom-right corner to resize.</div>
+  </div>
+  <div id="canvasWrap">
+    <canvas id="floorCanvas" width="1200" height="700"></canvas>
+  </div>
+
+<script>
+const API_BASE = '/api/rooms'; // same origin
+
+// --- existing canvas code (kept minimal here) ---
+const canvas = document.getElementById('floorCanvas');
+const ctx = canvas.getContext('2d');
+let rooms = []; // {id, x,y,w,h,label}
+let selectedId = null;
+const handleSize = 10;
+
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  rooms.forEach(r=>{
+    ctx.save();
+    ctx.fillStyle='#eef2ff';
+    ctx.strokeStyle = (r.id===selectedId)?'#4338ca':'#111827';
+    ctx.lineWidth=(r.id===selectedId)?2:1;
+    roundRect(ctx,r.x,r.y,r.w,r.h,4,true,true);
+    ctx.restore();
+    ctx.fillStyle='#111827';
+    ctx.font='14px sans-serif';
+    ctx.fillText(r.label||'Room', r.x+8, r.y+20);
+    if(r.id===selectedId){
+      ctx.fillStyle='#4338ca';
+      ctx.fillRect(r.x+r.w-handleSize, r.y+r.h-handleSize, handleSize, handleSize);
+    }
+  });
+}
+function roundRect(ctx,x,y,w,h,r,fill,stroke){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+  if(fill) ctx.fill();
+  if(stroke) ctx.stroke();
+}
+function getRoomAt(px,py){
+  for(let i=rooms.length-1;i>=0;i--){
+    const r=rooms[i];
+    if(px>=r.x && px<=r.x+r.w && py>=r.y && py<=r.y+r.h) return r;
+  }
+  return null;
+}
+function isOnHandle(r,px,py){
+  return (px>=r.x+r.w-handleSize && px<=r.x+r.w && py>=r.y+r.h-handleSize && py<=r.y+r.h);
+}
+
+let saveTimer = null;
+
+function autoSaveRoom(room) {
+  if (!room.id) return; // only save rooms that exist in DB
+
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    await fetch(`/api/rooms/${room.id}`, {
+      method: 'PUT',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(room)
+    });
+  }, 200); // debounce: waits 200ms so it doesn't spam server
+}
+
+let mode=null, dragOffset={x:0,y:0}, original=null;
+canvas.addEventListener('mousedown',(e)=>{
+  const rect=canvas.getBoundingClientRect();
+  const x=e.clientX-rect.left;
+  const y=e.clientY-rect.top;
+  const r=getRoomAt(x,y);
+  if(r){
+    selectedId=r.id;
+    if(isOnHandle(r,x,y)){
+      mode='resize';
+      original={w:r.w,h:r.h,startX:x,startY:y};
+    } else {
+      mode='move';
+      dragOffset.x = x - r.x;
+      dragOffset.y = y - r.y;
+    }
+  } else {
+    selectedId=null;
+  }
+  draw();
+});
+canvas.addEventListener('mousemove',(e)=>{
+  const rect=canvas.getBoundingClientRect();
+  const x=e.clientX-rect.left;
+  const y=e.clientY-rect.top;
+  canvas.style.cursor='default';
+  const hit = getRoomAt(x,y);
+  if(hit){
+    if(isOnHandle(hit,x,y)) canvas.style.cursor='nwse-resize'; else canvas.style.cursor='move';
+  }
+  if(!mode) return;
+  const room = rooms.find(rr => rr.id === selectedId);
+  if(!room) return;
+  if(mode==='move'){
+    room.x = x - dragOffset.x;
+    room.y = y - dragOffset.y;
+    room.x = Math.max(0, Math.min(room.x, canvas.width - room.w));
+    room.y = Math.max(0, Math.min(room.y, canvas.height - room.h));
+  } else if(mode==='resize'){
+    const dx = x - original.startX;
+    const dy = y - original.startY;
+    room.w = Math.max(40, original.w + dx);
+    room.h = Math.max(30, original.h + dy);
+    room.w = Math.min(room.w, canvas.width - room.x);
+    room.h = Math.min(room.h, canvas.height - room.y);
+  }
+  draw();
+  autoSaveRoom(room);
+});
+canvas.addEventListener('dblclick', async (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+
+  const room = getRoomAt(x, y);
+  if (!room) return;
+
+  const current = room.label || 'Meeting Room';
+  const newLabel = prompt('Room name:', current);
+  if (newLabel === null) return;           // user cancelled
+  const trimmed = newLabel.trim();
+  if (!trimmed) return;                    // ignore empty
+
+  room.label = trimmed;
+  draw();
+
+  // save renamed room to backend
+  if (room.id) {
+    await fetch(`/api/rooms/${room.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(room)
+    });
+  }
+});
+window.addEventListener('keydown', async (e) => {
+  if (e.key === 'r' || e.key === 'R') {
+    const room = rooms.find(r => r.id === selectedId);
+    if (!room) return;
+
+    const current = room.label || 'Meeting Room';
+    const newLabel = prompt('Room name:', current);
+    if (newLabel === null) return;
+    const trimmed = newLabel.trim();
+    if (!trimmed) return;
+
+    room.label = trimmed;
+    draw();
+
+    if (room.id) {
+      await fetch(`/api/rooms/${room.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(room)
+      });
+    }
+  }
+});
+
+window.addEventListener('mouseup',()=>{ mode=null; original=null; });
+
+
+document.getElementById('addRoom').addEventListener('click', async ()=>{
+  const newRoom = {
+    x: 100, y: 100, w:160, h:100, label:"Meeting Room"
+  };
+
+  // SAVE ROOM IMMEDIATELY
+  const resp = await fetch('/api/rooms', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(newRoom)
+  });
+  const saved = await resp.json();
+
+  rooms.push({
+    id: saved.id,
+    x: saved.x,
+    y: saved.y,
+    w: saved.w,
+    h: saved.h,
+    label: saved.label
+  });
+
+  draw();
+});
+
+
+document.getElementById('deleteRoom').addEventListener('click', async ()=>{
+  if(!selectedId){
+    // remove unsaved selection if it has no server id
+    const idx = rooms.findIndex(r => r.id === selectedId);
+    if(idx>=0) rooms.splice(idx,1);
+    draw();
+    return;
+  }
+  // delete from server
+  await fetch(API_BASE + '/' + selectedId, { method: 'DELETE' });
+  await loadAll();
+});
+
+document.getElementById('clearAll').addEventListener('click', async ()=>{
+  if(!confirm('Clear all rooms?')) return;
+  await fetch(API_BASE, { method: 'DELETE' });
+  rooms = [];
+  selectedId = null;
+  draw();
+});
+
+// Save all to backend (simple approach: delete all then re-create)
+document.getElementById('saveAll').addEventListener('click', async ()=>{
+  // naive approach: delete everything then insert current state
+  await fetch(API_BASE, { method: 'DELETE' });
+  // save each
+  for(const r of rooms){
+    const payload = { x: r.x, y: r.y, w: r.w, h: r.h, label: r.label };
+    const resp = await fetch(API_BASE, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const saved = await resp.json();
+    r.id = saved.id; // update id
+  }
+  draw();
+});
+
+// Load all from backend
+document.getElementById('loadAll').addEventListener('click', loadAll);
+async function loadAll(){
+  const resp = await fetch(API_BASE);
+  const data = await resp.json();
+  rooms = data.map(d => ({ id: d.id, x: d.x, y:d.y, w:d.w, h:d.h, label:d.label }));
+  selectedId = null;
+  draw();
+}
+
+// keyboard delete
+window.addEventListener('keydown', (e) => {
+  if((e.key === 'Delete' || e.key === 'Backspace') && selectedId){
+    const idx = rooms.findIndex(r => r.id === selectedId);
+    if(idx >= 0){
+      const room = rooms[idx];
+      if(room.id){
+        fetch(API_BASE + '/' + room.id, { method: 'DELETE' }).then(loadAll);
+      } else {
+        rooms.splice(idx,1);
+        selectedId=null;
+        draw();
+      }
+    }
+  }
+});
+
+// initial draw
+draw();
+
+</script>
+</body>
+</html>
